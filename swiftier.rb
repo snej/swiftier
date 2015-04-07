@@ -8,10 +8,14 @@
 # Public domain. Do what thou wilt shall be the whole of the law.
 # April 6, 2015
 
+# Log something to the output
 def NOTE(str)
   puts ">>>" + str
 end
 
+$deIndent = false
+
+# Reads & returns the next line
 def nextLine()
   line = $curLine
   if line then
@@ -19,25 +23,29 @@ def nextLine()
   else
     line = gets()
     line.rstrip!  if line
+    if $deIndent && line.start_with?("    ") then
+      line = line[4,line.length-4]
+    end
   end
   return line
 end
 
+# Returns the next line but doesn't consume it (next call to peek/nextLine will return it again)
 def peekLine()
   unless $curLine then
-    $curLine = gets()
-    $curLine.rstrip!  if $curLine
+    $curLine = nextLine()
   end
   return $curLine
 end
 
+# Consumes blank lines
 def skipBlankLines()
   while peekLine() == ""
     nextLine()
   end
 end
 
-
+# If `line` doesn't end in a semicolon, reads & discards lines up to & including the next that does.
 def skipTillSemicolon(line)
   until line =~ /;\s*$/
     line = nextLine()
@@ -46,22 +54,34 @@ end
 
 
 $typeMap = {
-  "void" => "Void",
-  "int" => "Int",
+  "void"      => "Void",
+  "int"       => "Int",
+  "unsigned"  => "UInt",
   "NSInteger" => "Int",
-  "unsigned" => "UInt",
-  "NSUInteger" => "UInt",
-  "uint8_t" => "UInt8",
-  "uint32_t" => "UInt32",
-  "int32_t" => "Int32",
-  "BOOL" => "Bool",
-  "bool" => "Bool",
-  "float" => "Float",
-  "double" => "Double",
-  "NSString" => "String",
+  "NSUInteger"=> "UInt",
+  "SInt8"     => "Int8",
+  "int8_t"    => "Int8",
+  "uint8_t"   => "UInt8",
+  "SInt16"    => "Int16",
+  "int16_t"   => "Int16",
+  "uint16_t"  => "UInt16",
+  "SInt32"    => "Int32",
+  "int32_t"   => "Int32",
+  "uint32_t"  => "UInt32",
+  "SInt64"    => "Int64",
+  "int64_t"   => "Int64",
+  "uint64_t"  => "UInt64",
+  "BOOL"      => "Bool",
+  "bool"      => "Bool",
+  "char"      => "UInt8",
+  "float"     => "Float",
+  "double"    => "Double",
+  "NSString"  => "String",
 }
 
+# Converts an Objective-C to a Swift type name
 def convertType(type)
+  return "NSErrorPointer"  if type == "NSError**"
   isPointer = (type.chomp!("*") != nil)
   type.rstrip!
   if type =~ /^id<(\w+)>$/ then
@@ -74,6 +94,7 @@ def convertType(type)
 end
 
 
+# Parses an @implementation block. First line has been read already; `name` is the class name.
 def parseImplementation(name)
   puts "class #{name} {"
   if peekLine() == "{" then
@@ -82,7 +103,7 @@ def parseImplementation(name)
     while (line = nextLine()) != "}"
       # instance variable:
       if line =~ /^\s*(\w.*)\s+(\w+)\s*;/ then
-        name, type = [$2, $1.chomp("*")]
+        name, type = $2, $1
         puts "private var #{name}: #{convertType(type)}"
       end
     end
@@ -90,6 +111,7 @@ def parseImplementation(name)
 end
 
 
+# Parses an @interface block. (Currently just skips it.)
 def parseInterface(name, superclass, categoryName)
   while nextLine() != "@end" do
   end
@@ -97,6 +119,7 @@ def parseInterface(name, superclass, categoryName)
 end
 
 
+# Parses a method header, whose first line (the one starting with +/-) is already read.
 def parseMethod(isClassMethod, returnType, name, params, hasBrace)
   if name.start_with?("init") || name.start_with?("_init") then
     if name =~ /^_?initWith(\w+)$/ then
@@ -117,7 +140,7 @@ def parseMethod(isClassMethod, returnType, name, params, hasBrace)
   while i < params.length do
     line += ", "  if i > 0
     keyword, type, paramName = params[i, 3]
-    line += keyword + "  "  if keyword != paramName && keyword != ""
+    line += keyword + " "  if keyword != paramName && keyword != ""
     line += "#{paramName}: #{convertType(type)}"
     i += 3
   end
@@ -128,7 +151,7 @@ def parseMethod(isClassMethod, returnType, name, params, hasBrace)
       nextLine()
       keyword, type, paramName = [$1, $2, $3]
       line += ",\n" + ' '*indent
-      line += keyword + "  "  if keyword != paramName
+      line += keyword + " "  if keyword != paramName
       line += paramName + ": " + convertType(type)
     end
   end
@@ -140,6 +163,7 @@ def parseMethod(isClassMethod, returnType, name, params, hasBrace)
 end
 
 
+# Parses a message-send statement, i.e one that starts with '[' and ends with ']'.
 def parseMessageSend(expr)
   if expr =~ /^(\w+)\s+(\w+)$/ then  # no parameters
     receiver, message = $1, $2
@@ -160,6 +184,7 @@ def parseMessageSend(expr)
 end
 
 
+# Processes & converts lines until the next that ends in a ';', then adds a "}" line after it.
 def addMissingCloseBrace(indent)
   done = false
   while !done do
@@ -170,6 +195,7 @@ def addMissingCloseBrace(indent)
 end
 
 
+# Processes a line.
 def convertTopLevel(line)
   case line
   when /^\s*#import\s+(.*)$/
@@ -217,11 +243,22 @@ def convertTopLevel(line)
   line.gsub!(/\b(NS(Parameter|C)?)Assert\b/, "assert")
   
   case line
-  when /^(\s+)(}?\s*(?:else\s+)?if\s*)\((.*)\)\s*({?)/ then
+  when /^(\s+)(}?\s*(?:else\s+)?if)\s*\((.*)\)\s*({?)/ then
     # 'if' or 'else if'
     indent, keyword, condition, closeBrace = $1, $2, $3, $4
-    puts "#{indent}#{keyword}#{condition} {"
-    addMissingCloseBrace(indent)  if closeBrace == ""
+    if keyword == "if" && condition == "self" then
+      # The 'if (self)...' in an initializer -- get rid of it
+      $deIndent = true
+      while peekLine().start_with?(indent) do
+        convertNextLine()
+      end
+      $deIndent = false
+      nextLine() # skip the "}"
+      nextLine()  if peekLine() =~ /\s+return\s+self\s*;/
+    else
+      puts "#{indent}#{keyword} #{condition} {"
+      addMissingCloseBrace(indent)  if closeBrace == ""
+    end
     return nil
   when /^(\s+)(}?\s*else)\s*({?)/ then
     # 'else'
@@ -231,6 +268,10 @@ def convertTopLevel(line)
     return nil
   when /^(\s+)\[\s*(.*)\s*\]$/ then
     # Message-send
+    result = parseMessageSend($2)
+    return result ? $1 + result : line
+  when /^(\s+)self\s*=\s*\[\s*(.*)\s*\]/ then
+    # Calling another initializer
     result = parseMessageSend($2)
     return result ? $1 + result : line
   when /^(\s+)(\w+)(?:\s|\*)+(\w+)\s*(?:\=\s*(.*))?$/ then
@@ -248,6 +289,7 @@ def convertTopLevel(line)
 end
 
 
+# Reads a line, processes it, and outputs it.
 def convertNextLine()
   line = nextLine()
   return false  unless line
@@ -264,6 +306,7 @@ def convertNextLine()
   return true
 end
 
+# Top level code that just processes every line in the file.
 while line = nextLine()
   while convertNextLine() do
   end
