@@ -52,6 +52,12 @@ def skipTillSemicolon(line)
   end
 end
 
+def downcaseFirst!(str)
+  if str.length == 1 || (str[2] == str[2].downcase) then
+    str[0] = str[0].downcase
+  end
+end
+
 
 $typeMap = {
   "void"      => "Void",
@@ -124,7 +130,7 @@ def parseMethod(isClassMethod, returnType, name, params, hasBrace)
   if name.start_with?("init") || name.start_with?("_init") then
     if name =~ /^_?initWith(\w+)$/ then
       paramName = $1
-      paramName[0] = paramName[0].downcase
+      downcaseFirst!(paramName)
       params[0] = paramName
       indent = 5
     end
@@ -163,24 +169,63 @@ def parseMethod(isClassMethod, returnType, name, params, hasBrace)
 end
 
 
-# Parses a message-send statement, i.e one that starts with '[' and ends with ']'.
-def parseMessageSend(expr)
-  if expr =~ /^(\w+)\s+(\w+)$/ then  # no parameters
+# Converts a message-send statement, i.e one that starts with '[' and ends with ']', but _only_
+# one that doesn't contain any square brackets. This is a subroutine of convertMessageSends.
+def convert1MessageSend(expr)
+  if expr =~ /^(\S+)\s+(\w+)$/ then  # no parameters
     receiver, message = $1, $2
-    return "#{receiver}.#{message}()"
+    return receiver  if message == "alloc"        # [Foo alloc] --> Foo
+    return receiver+"()"  if message == "init"    # [Foo init]  --> Foo()
+    return "#{receiver}.#{message}()"             # [Foo bar] --> Foo.bar()
   end
   
   tokens = expr.split(/\s*\b(\w+):\s*/)
   return nil  unless tokens.length >= 3
   tokens.each {|token| return nil  if token.include?("[")}
-  result = tokens[0] + "." + tokens[1] + "(" + tokens[2]
+  
+  # Emit the receiver and the first parameter:
+  receiver, keyword, param = tokens[0..2]
+  if keyword.start_with?("init") then
+    # Handle init and initWithXXX:
+    keyword = keyword[4..keyword.length]
+    if keyword.start_with?("With") then
+      keyword = keyword[4..keyword.length]
+      downcaseFirst!(keyword)
+      # Ugly hack: If the translated expression contains a ':' it will confuse subsequent parsing,
+      # so instead we'll output a '`'. These get fixed up to ':'s at the end of convertMessageSends.
+      result = "#{receiver}(#{keyword}` #{param}"
+    else
+      result = "#{receiver}(#{param}"
+    end
+  else
+    # Regular message:
+    result = receiver + "." + keyword + "(" + param
+  end
+  
+  # Emit any other parameters:
   i = 3
   while i < tokens.length do
-    result += ", #{tokens[i]}: #{tokens[i+1]}"
+    # See above comment about '`'!
+    result += ", #{tokens[i]}` #{tokens[i+1]}"
     i += 2
   end
-  result += ")"
-  return result
+  return result + ")"
+end
+
+
+# Converts all Objective-C message-sends in the line into Swift syntax.
+def convertMessageSends(line)
+  # Keep looking for an innermost message expression (one without any nested messages), and
+  # converting it to Swift syntax. Do this until there aren't any left.
+  loop do
+    result = line.sub(/\[\s*([^\[\]]*)\s*\]/) do |expr|
+      parsed = convert1MessageSend($1)
+      parsed != nil ? parsed : expr
+    end
+    break  if line == result
+    line = result
+  end
+  return line.gsub("`", ":")  # Fix the temporary '`'s that got output as placeholders for ':'s
 end
 
 
@@ -242,6 +287,8 @@ def convertTopLevel(line)
   line.gsub!(/\bNSLog\b/, "println")
   line.gsub!(/\b(NS(Parameter|C)?)Assert\b/, "assert")
   
+  line = convertMessageSends(line)
+  
   case line
   when /^(\s+)(}?\s*(?:else\s+)?if)\s*\((.*)\)\s*({?)/ then
     # 'if' or 'else if'
@@ -266,13 +313,9 @@ def convertTopLevel(line)
     puts "#{indent}#{keyword} {"
     addMissingCloseBrace(indent)  if closeBrace == ""
     return nil
-  when /^(\s+)\[\s*(.*)\s*\]$/ then
-    # Message-send
-    result = parseMessageSend($2)
-    return result ? $1 + result : line
   when /^(\s+)self\s*=\s*\[\s*(.*)\s*\]/ then
     # Calling another initializer
-    result = parseMessageSend($2)
+    result = convertMessageSend($2)
     return result ? $1 + result : line
   when /^(\s+)(\w+)(?:\s|\*)+(\w+)\s*(?:\=\s*(.*))?$/ then
     # Local variable declaration
@@ -307,7 +350,5 @@ def convertNextLine()
 end
 
 # Top level code that just processes every line in the file.
-while line = nextLine()
-  while convertNextLine() do
-  end
+while convertNextLine() do
 end
